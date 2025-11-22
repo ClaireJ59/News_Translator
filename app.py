@@ -2,91 +2,145 @@ import streamlit as st
 import json
 import google.generativeai as genai
 from PIL import Image
+import plotly.graph_objects as go
 import io
 
 # 頁面設定
 st.set_page_config(
-    page_title="日文報紙 AI 切割翻譯助手",
+    page_title="日文報紙 AI 批次處理助手",
     page_icon="📰",
     layout="wide"
 )
 
-# 自定義 CSS 優化排版
+# 自定義 CSS
 st.markdown("""
 <style>
     .stTextArea textarea {font-size: 16px !important;}
-    div[data-testid="stExpander"] details summary p {font-size: 1.1rem; font-weight: bold;}
 </style>
 """, unsafe_allow_html=True)
 
 # 側邊欄：設定
 with st.sidebar:
-    st.header("⚙️ 系統設定")
-    api_key = st.text_input("請輸入 Google AI Studio API Key", type="password", help="建議使用 Gemini 1.5 Pro 以獲得最佳視覺識別效果")
+    st.header("⚙️ 設定 (Gemini)")
+    api_key = st.text_input("請輸入 Google AI Studio API Key", type="password")
     
-    st.info("💡 提示：此版本支援批次處理與自動切圖。")
+    if not api_key:
+        st.warning("請輸入 API Key。")
+    else:
+        st.success("API Key 已就緒")
+
     st.markdown("---")
     st.markdown("""
     **功能說明：**
-    1. **批次上傳**：一次處理多張報紙。
-    2. **自動切圖**：AI 識別區塊座標，將原圖切分。
-    3. **圖文對照**：左側顯示切片原圖，右側顯示繁中翻譯。
-    4. **圖片提取**：獨立識別報紙中的照片。
+    1. **批次處理**：一次上傳多張報紙。
+    2. **互動視覺化**：在原圖上懸浮滑鼠可查看區塊標題。
+    3. **圖片提取**：自動識別並裁切報紙中的照片。
     """)
 
-st.title("📰 日文報紙 AI 切割翻譯助手 (繁體中文版)")
-st.markdown("上傳報紙 -> AI 識別座標與內容 -> **自動切圖對照閱讀**")
+st.title("📰 日文報紙結構化工具 (視覺化互動版)")
+st.markdown("上傳圖片 -> AI 批次分析 -> **互動式原圖預覽** & **圖文對照**")
 
-# 輔助函式：裁切圖片
-def crop_image(image, box_2d):
-    """
-    根據 Gemini 返回的 0-1000 比例座標裁切圖片
-    box_2d 格式: [ymin, xmin, ymax, xmax]
-    """
-    try:
-        width, height = image.size
-        ymin, xmin, ymax, xmax = box_2d
-        
-        # 轉換為像素座標
-        left = (xmin / 1000) * width
-        top = (ymin / 1000) * height
-        right = (xmax / 1000) * width
-        bottom = (ymax / 1000) * height
-        
-        # 裁切
-        cropped_img = image.crop((left, top, right, bottom))
-        return cropped_img
-    except Exception as e:
-        return None
+# 輔助函數：建立互動式 Plotly 圖表
+def create_interactive_plot(pil_image, sections):
+    img_width, img_height = pil_image.size
+    
+    # 建立基本圖表
+    fig = go.Figure()
 
-# 核心處理函式
-def process_image_with_gemini(api_key, image_input):
+    # 1. 添加底圖
+    fig.add_trace(go.Image(z=pil_image))
+
+    # 2. 繪製區塊框線和懸浮點
+    for section in sections:
+        box = section.get("box_2d") # [ymin, xmin, ymax, xmax] (0-1000)
+        if not box:
+            continue
+
+        ymin, xmin, ymax, xmax = box
+        
+        # 轉換座標為像素 (Gemini 返回的是 0-1000 的比例)
+        x0 = (xmin / 1000) * img_width
+        y0 = (ymin / 1000) * img_height
+        x1 = (xmax / 1000) * img_width
+        y1 = (ymax / 1000) * img_height
+        
+        # 根據類型決定顏色
+        is_image = section.get("type") == "image"
+        color = "rgba(255, 50, 50, 0.3)" if is_image else "rgba(50, 100, 255, 0.3)" # 紅色是圖，藍色是文
+        border_color = "red" if is_image else "blue"
+        hover_text = section.get("content_zh") if is_image else section.get("headline_zh")
+
+        # 添加矩形 (Shape) - 用於視覺顯示
+        fig.add_shape(
+            type="rect",
+            x0=x0, y0=y0, x1=x1, y1=y1,
+            line=dict(color=border_color, width=2),
+            fillcolor=color,
+        )
+
+        # 添加透明的散點 (Scatter) - 用於顯示 Hover 資訊
+        # Plotly 的 Shape hover 支援較差，用 Scatter 覆蓋在中心是常用技巧
+        fig.add_trace(go.Scatter(
+            x=[(x0 + x1) / 2],
+            y=[(y0 + y1) / 2],
+            text=[f"<b>{hover_text}</b><br>(點擊下方詳情查看全文)"],
+            mode="markers",
+            marker=dict(opacity=0, size=0.1), # 完全透明
+            hoverinfo="text",
+            showlegend=False
+        ))
+
+    # 設定圖表佈局
+    fig.update_layout(
+        width=800,
+        height=800 * (img_height / img_width),
+        margin=dict(l=0, r=0, t=0, b=0),
+        xaxis=dict(visible=False, range=[0, img_width]),
+        # yaxis 必須反轉，因為圖片座標 (0,0) 在左上角，Plotly 默認在左下角
+        yaxis=dict(visible=False, range=[img_height, 0], scaleanchor="x"),
+    )
+    
+    return fig
+
+# 輔助函數：裁切圖片
+def crop_image_section(pil_image, box_2d):
+    if not box_2d: return None
+    width, height = pil_image.size
+    ymin, xmin, ymax, xmax = box_2d
+    left = (xmin / 1000) * width
+    top = (ymin / 1000) * height
+    right = (xmax / 1000) * width
+    bottom = (ymax / 1000) * height
+    return pil_image.crop((left, top, right, bottom))
+
+# 核心處理函數
+def process_with_gemini(api_key, image_input):
     genai.configure(api_key=api_key)
-    # 使用 Gemini 1.5 Pro，它的視覺定位能力較強
-    model = genai.GenerativeModel('gemini-3-pro-preview')
+    model = genai.GenerativeModel('gemini-1.5-pro')
 
     prompt = """
     你是一位專業的日文報紙結構化專家。
-    請分析這張報紙圖片，識別其中的「文章區塊」和「獨立圖片/照片區塊」。
+    請分析這張報紙圖片，識別其中的「文章區塊」和「圖片區塊」。
     
     **重要要求：**
-    1. **座標識別 (Bounding Boxes)**：對於每個區塊，請準確估算出其在圖片中的位置範圍。使用 [ymin, xmin, ymax, xmax] 格式，數值範圍為 0 到 1000 (代表相對位置)。
-    2. **翻譯與提取**：
-       - 若是文章：提取日文標題與內文，並翻譯成流暢的「繁體中文」。
+    1. **座標識別 (Bounding Boxes)**：對於每個區塊，請準確估算出其位置。使用 [ymin, xmin, ymax, xmax] 格式，數值範圍為 0 到 1000 (代表相對位置)。
+    2. **分類**：區分該區塊是 "text" (文章) 還是 "image" (新聞照片/插圖)。
+    3. **翻譯與提取**：
+       - 若是文章：提取日文標題、內文，並翻譯成**繁體中文**。
        - 若是圖片：請簡要描述圖片內容（繁體中文）。
-    3. **輸出格式**：必須是純 JSON 格式。
+    4. **輸出格式**：必須是純 JSON 格式。
 
     **JSON 結構範本：**
     {
-      "date": "YYYY年MM月DD日 (若無則填 '未知')",
+      "date": "YYYY年MM月DD日",
       "sections": [
         {
-          "type": "text",  // 或者是 "image"
-          "box_2d": [ymin, xmin, ymax, xmax], // 例如 [100, 100, 500, 900]
-          "headline_jp": "日文標題 (如果是圖片則留空)",
-          "headline_zh": "繁中標題 (如果是圖片則留空)",
-          "content_jp": "日文內文全文",
-          "content_zh": "繁中內文全文 (若是圖片，請填寫圖片描述)"
+          "type": "text",  // 或 "image"
+          "box_2d": [ymin, xmin, ymax, xmax], 
+          "headline_jp": "日文標題 (圖片則留空)",
+          "headline_zh": "繁中標題 (圖片則留空)",
+          "body_text_jp": "日文內文",
+          "body_text_zh": "繁中內文 (若是圖片，請填寫描述)",
         }
       ]
     }
@@ -101,89 +155,92 @@ def process_image_with_gemini(api_key, image_input):
     except Exception as e:
         return f"Error: {str(e)}"
 
-# 上傳組件 (允許批次)
-uploaded_files = st.file_uploader("請選擇報紙圖片 (支援多選)", type=["jpg", "jpeg", "png", "webp"], accept_multiple_files=True)
+# --------------------------
+# 主程式邏輯
+# --------------------------
+
+# 允許上傳多個檔案
+uploaded_files = st.file_uploader("請拖入或選擇報紙圖片 (支援批次)", type=["jpg", "jpeg", "png", "webp"], accept_multiple_files=True)
 
 if uploaded_files and api_key:
-    if st.button(f"🚀 開始處理 {len(uploaded_files)} 張圖片", type="primary"):
+    if st.button(f"🚀 開始批次處理 ({len(uploaded_files)} 張)", type="primary"):
         
-        # 建立進度條
         progress_bar = st.progress(0)
         
         for idx, uploaded_file in enumerate(uploaded_files):
-            st.markdown(f"### 📄 正在處理：{uploaded_file.name}")
+            st.divider()
+            st.header(f"📄 檔案：{uploaded_file.name}")
             
             # 讀取圖片
             image = Image.open(uploaded_file)
             
-            with st.spinner(f"AI 正在分析版面佈局與翻譯中... ({idx+1}/{len(uploaded_files)})"):
-                json_result = process_image_with_gemini(api_key, image)
-            
-            try:
-                data = json.loads(json_result)
+            with st.spinner(f"正在分析第 {idx+1} 張圖片..."):
+                result_text = process_with_gemini(api_key, image)
                 
-                # 顯示整體資訊
-                st.info(f"📅 發行日期：{data.get('date', '未知')}")
-                
-                # 遍歷每個區塊
-                sections = data.get("sections", [])
-                
-                # 使用 Expander 讓介面更整潔
-                with st.expander(f"點擊展開 {uploaded_file.name} 的詳細切片結果", expanded=True):
+                try:
+                    data = json.loads(result_text)
                     
-                    for i, section in enumerate(sections):
-                        col_img, col_text = st.columns([1, 2])
-                        
-                        # 處理圖片裁切
-                        box = section.get("box_2d")
-                        if box:
-                            cropped = crop_image(image, box)
-                        else:
-                            cropped = None
-                        
-                        # 左欄：顯示切片
-                        with col_img:
-                            if cropped:
-                                st.image(cropped, caption=f"區塊 #{i+1} 原圖切片", use_container_width=True)
-                            else:
-                                st.warning("無法取得裁切座標")
-                                
-                        # 右欄：顯示翻譯內容
-                        with col_text:
-                            sec_type = section.get("type", "text")
-                            
-                            if sec_type == "image":
-                                st.markdown("#### 🖼️ 圖片/照片區塊")
-                                st.success(f"**圖片描述：** {section.get('content_zh')}")
-                            else:
-                                st.markdown(f"#### {section.get('headline_zh', '無標題')}")
-                                st.caption(f"原文標題：{section.get('headline_jp')}")
-                                
-                                tab_zh, tab_jp = st.tabs(["🇹🇼 繁中譯文", "🇯🇵 日文原文"])
-                                with tab_zh:
-                                    st.write(section.get('content_zh'))
-                                with tab_jp:
-                                    st.text(section.get('content_jp'))
-                        
-                        st.divider() # 分隔線
-                
-                # 下載 JSON
-                json_str = json.dumps(data, indent=2, ensure_ascii=False)
-                st.download_button(
-                    label=f"📥 下載 {uploaded_file.name} 的 JSON",
-                    data=json_str,
-                    file_name=f"{uploaded_file.name}_result.json",
-                    mime="application/json"
-                )
-                
-            except json.JSONDecodeError:
-                st.error(f"檔案 {uploaded_file.name} 解析失敗。AI 回傳了非標準 JSON。")
-                with st.expander("查看原始錯誤內容"):
-                    st.text(json_result)
-            except Exception as e:
-                st.error(f"處理檔案 {uploaded_file.name} 時發生未知錯誤: {e}")
+                    # -----------------------------
+                    # 1. 互動式可視化 (Plotly)
+                    # -----------------------------
+                    st.subheader("1. 互動式版面分佈 (滑鼠懸停查看標題)")
+                    sections = data.get("sections", [])
+                    fig = create_interactive_plot(image, sections)
+                    st.plotly_chart(fig, use_container_width=True)
+                    
+                    # -----------------------------
+                    # 2. 獨立圖片提取 (Gallery)
+                    # -----------------------------
+                    st.subheader("2. 圖片提取 (Image Extraction)")
+                    image_sections = [s for s in sections if s.get("type") == "image"]
+                    
+                    if image_sections:
+                        cols = st.columns(len(image_sections) if len(image_sections) < 4 else 4)
+                        for i, sec in enumerate(image_sections):
+                            cropped_img = crop_image_section(image, sec.get("box_2d"))
+                            with cols[i % 4]:
+                                if cropped_img:
+                                    st.image(cropped_img, use_container_width=True)
+                                    st.caption(f"圖說：{sec.get('body_text_zh')}")
+                    else:
+                        st.info("本頁未偵測到主要新聞圖片。")
 
-            # 更新進度條
+                    # -----------------------------
+                    # 3. 詳細圖文對照 (JSON Data)
+                    # -----------------------------
+                    st.subheader("3. 詳細翻譯內容")
+                    st.info(f"📅 提取日期：{data.get('date', '未知')}")
+                    
+                    # 只顯示文字類型的區塊
+                    text_sections = [s for s in sections if s.get("type") == "text"]
+                    
+                    for sec in text_sections:
+                        with st.expander(f"📝 {sec.get('headline_zh', '無標題')}", expanded=False):
+                            c1, c2 = st.columns(2)
+                            with c1:
+                                st.markdown("**[繁中譯文]**")
+                                st.write(sec.get('body_text_zh'))
+                            with c2:
+                                st.markdown("**[日文原文]**")
+                                st.caption(sec.get('body_text_jp'))
+                    
+                    # 下載 JSON
+                    json_str = json.dumps(data, indent=2, ensure_ascii=False)
+                    st.download_button(
+                        label=f"📥 下載 {uploaded_file.name} JSON",
+                        data=json_str,
+                        file_name=f"{uploaded_file.name}_result.json",
+                        mime="application/json",
+                        key=f"dl_{idx}"
+                    )
+
+                except json.JSONDecodeError:
+                    st.error("解析失敗，AI 回傳格式有誤。")
+                    st.text(result_text)
+                except Exception as e:
+                    st.error(f"發生錯誤: {e}")
+            
+            # 更新進度
             progress_bar.progress((idx + 1) / len(uploaded_files))
             
-        st.success("🎉 所有圖片處理完成！")
+        st.success("✅ 所有圖片處理完成！")
