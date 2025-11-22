@@ -116,7 +116,7 @@ def crop_image_section(pil_image, box_2d):
 # 核心處理函數
 def process_with_gemini(api_key, image_input):
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-1.5-pro')
+    model = genai.GenerativeModel('gemini-3-pro-preview')
 
     prompt = """
     你是一位專業的日文報紙結構化專家。
