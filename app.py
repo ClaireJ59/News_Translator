@@ -63,7 +63,7 @@ def crop_image(image, box_2d):
 def process_image_with_gemini(api_key, image_input):
     genai.configure(api_key=api_key)
     # 使用 Gemini 1.5 Pro，它的視覺定位能力較強
-    model = genai.GenerativeModel('gemini-1.5-pro')
+    model = genai.GenerativeModel('gemini-3-pro-preview')
 
     prompt = """
     你是一位專業的日文報紙結構化專家。
