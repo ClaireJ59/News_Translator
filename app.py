@@ -102,7 +102,7 @@ def crop_image_section(pil_image, box_2d):
 def process_with_gemini(api_key, image_input):
     genai.configure(api_key=api_key)
     # 使用 Gemini 1.5 Pro，對於版面分析能力最強
-    model = genai.GenerativeModel('gemini-1.5-pro')
+    model = genai.GenerativeModel('gemini-3-pro-preview')
 
     # ---------------------------------------------------------
     # Prompt 重點：
