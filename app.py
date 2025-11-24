@@ -2,27 +2,52 @@ import streamlit as st
 import json
 import google.generativeai as genai
 from PIL import Image
-import plotly.graph_objects as go
 import io
 
-# 頁面設定
+# ---------------------------------------------------------
+# 頁面基本設定
+# ---------------------------------------------------------
 st.set_page_config(
-    page_title="日文報紙 AI 批次處理助手",
+    page_title="日文報紙新聞分塊助手",
     page_icon="📰",
     layout="wide"
 )
 
-# 自定義 CSS
+# CSS 優化：讓文字顯示更清晰，並增加區塊邊框感
 st.markdown("""
 <style>
-    .stTextArea textarea {font-size: 16px !important;}
-    div[data-testid="stExpander"] details summary p {font-size: 1.1rem; font-weight: bold;}
+    .news-card {
+        padding: 20px;
+        border-radius: 10px;
+        border: 1px solid #e0e0e0;
+        background-color: #f9f9f9;
+        margin-bottom: 20px;
+    }
+    .main-title {
+        color: #2c3e50;
+        font-size: 1.5rem !important;
+        font-weight: 700 !important;
+        margin-bottom: 5px !important;
+    }
+    .sub-title {
+        color: #555;
+        font-size: 1.1rem !important;
+        font-weight: 600 !important;
+        margin-bottom: 15px !important;
+    }
+    .caption-text {
+        font-size: 0.9rem;
+        color: #666;
+        font-style: italic;
+    }
 </style>
 """, unsafe_allow_html=True)
 
-# 側邊欄：設定
+# ---------------------------------------------------------
+# 側邊欄設定
+# ---------------------------------------------------------
 with st.sidebar:
-    st.header("⚙️ 設定 (Gemini)")
+    st.header("⚙️ 系統設定")
     api_key = st.text_input("請輸入 Google AI Studio API Key", type="password")
     
     if not api_key:
@@ -33,134 +58,95 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("""
     **功能說明：**
-    1. **純淨圖片裁切**：AI 會精準框選圖片範圍，排除旁邊的附註文字。
-    2. **依標題分段**：文章自動分塊。
-    3. **互動視覺化**：懸浮查看資訊。
+    1. **線段識別**：依據報紙分隔線獨立提取新聞。
+    2. **標題結構**：區分大標與副標。
+    3. **跨段合併**：自動連接跨欄位的文章內容。
+    4. **圖片分離**：乾淨裁切圖片，翻譯附註。
     """)
 
-st.title("📰 日文報紙結構化工具 (純淨圖片版)")
-st.markdown("上傳圖片 -> AI 批次分析 -> **純圖片提取** & **文章精準翻譯**")
+st.title("📰 日文報紙新聞分塊助手")
+st.markdown("上傳圖片 -> AI 依分隔線切分新聞 -> **獨立卡片式閱讀**")
 
-# 輔助函數：建立互動式 Plotly 圖表
-def create_interactive_plot(pil_image, sections):
-    img_width, img_height = pil_image.size
-    
-    fig = go.Figure()
+# ---------------------------------------------------------
+# 核心邏輯函數
+# ---------------------------------------------------------
 
-    # 1. 添加底圖
-    fig.add_trace(go.Image(z=pil_image))
-
-    # 2. 繪製區塊框線和懸浮點
-    for section in sections:
-        box = section.get("box_2d") 
-        if not box:
-            continue
-
-        ymin, xmin, ymax, xmax = box
+def crop_image_section(pil_image, box_2d):
+    """
+    根據 AI 回傳的 [ymin, xmin, ymax, xmax] (0-1000) 裁切圖片
+    """
+    if not box_2d: return None
+    try:
+        width, height = pil_image.size
+        ymin, xmin, ymax, xmax = box_2d
         
         # 轉換座標
-        x0 = (xmin / 1000) * img_width
-        y0 = (ymin / 1000) * img_height
-        x1 = (xmax / 1000) * img_width
-        y1 = (ymax / 1000) * img_height
+        left = (xmin / 1000) * width
+        top = (ymin / 1000) * height
+        right = (xmax / 1000) * width
+        bottom = (ymax / 1000) * height
         
-        is_image = section.get("type") == "image"
-        # 圖片用紅色框，文字用藍色框
-        color = "rgba(255, 50, 50, 0.2)" if is_image else "rgba(50, 100, 255, 0.2)"
-        border_color = "red" if is_image else "blue"
-        
-        hover_text = section.get("body_text_zh") if is_image else section.get("headline_zh")
-        if not hover_text:
-            hover_text = "(無文字內容)"
+        # 邊界檢查
+        left = max(0, left)
+        top = max(0, top)
+        right = min(width, right)
+        bottom = min(height, bottom)
 
-        # 繪製矩形
-        fig.add_shape(
-            type="rect",
-            x0=x0, y0=y0, x1=x1, y1=y1,
-            line=dict(color=border_color, width=2),
-            fillcolor=color,
-        )
+        if right <= left or bottom <= top:
+            return None
 
-        # 繪製透明懸浮點
-        fig.add_trace(go.Scatter(
-            x=[(x0 + x1) / 2],
-            y=[(y0 + y1) / 2],
-            text=[f"<b>{hover_text}</b>"],
-            mode="markers",
-            marker=dict(opacity=0, size=0.1),
-            hoverinfo="text",
-            showlegend=False
-        ))
+        return pil_image.crop((left, top, right, bottom))
+    except Exception:
+        return None
 
-    fig.update_layout(
-        width=800,
-        height=800 * (img_height / img_width),
-        margin=dict(l=0, r=0, t=0, b=0),
-        xaxis=dict(visible=False, range=[0, img_width]),
-        yaxis=dict(visible=False, range=[img_height, 0], scaleanchor="x"),
-    )
-    
-    return fig
-
-# 輔助函數：裁切圖片
-def crop_image_section(pil_image, box_2d):
-    if not box_2d: return None
-    width, height = pil_image.size
-    ymin, xmin, ymax, xmax = box_2d
-    left = (xmin / 1000) * width
-    top = (ymin / 1000) * height
-    right = (xmax / 1000) * width
-    bottom = (ymax / 1000) * height
-    return pil_image.crop((left, top, right, bottom))
-
-# 核心處理函數
 def process_with_gemini(api_key, image_input):
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-3-pro-preview')
+    # 使用 Gemini 1.5 Pro，對於版面分析能力最強
+    model = genai.GenerativeModel('gemini-1.5-pro')
 
     # ---------------------------------------------------------
-    # Prompt 修改重點：
-    # 要求 box_2d 嚴格排除文字，只包含圖像
+    # Prompt 重點：
+    # 1. 依據線段 (Visual Separators) 分隔新聞。
+    # 2. 區分 main_headline, sub_headline。
+    # 3. 跨欄合併 (Cross-column merging)。
     # ---------------------------------------------------------
     prompt = """
-    你是一位專業的日文報紙結構化專家。
-    請分析這張報紙圖片，識別其中的「文章區塊」和「圖片區塊」。
-    
-    **處理規則 (嚴格執行)：**
+    你是一位專業的日文報紙編輯與翻譯專家。
+    請分析這張報紙圖片，根據版面上的「分隔線 (Line Separators)」與「空白間距」，將每一則獨立的新聞報導提取出來。
 
-    1. **文章區塊 (Type: "text")**:
-       - **分段依據**：請依照報紙的「標題 (Headline/見出し)」來劃分區塊。
-       - **內容提取**：提取日文標題與內文，並翻譯成流暢的**繁體中文**。
-       - **座標**：包含標題和內文的範圍。
-    
+    **處理規則 (請嚴格執行)：**
+
+    1. **新聞區塊識別 (Type: "news")**:
+       - **邊界判斷**：請仔細觀察報紙上的直線或分隔線，這些通常區隔了不同的新聞。請將同一則新聞的所有內容（包含跨欄、跨段落的文字）合併為一個區塊。
+       - **標題結構**：請區分「大標題 (Main Headline)」與「副標題 (Sub Headline)」。若只有一個標題則填入大標題。
+       - **內容提取**：提取內文並翻譯成通順的**繁體中文**。請自動連接跨行或跨欄的句子。
+
     2. **圖片區塊 (Type: "image")**:
-       - **重要：座標範圍 (box_2d)**：**請嚴格只標示「照片/插圖圖像本身」的邊界**。絕對**不要**將下方的說明文字（Caption）包含在座標框內。我要乾淨的圖片裁切。
-       - **文字識別**：雖然座標框不包含文字，但請你視覺上讀取該圖片緊鄰的說明文字。
-       - **翻譯**：將讀取到的說明文字翻譯成繁體中文。若無文字則留空。絕對不要自行看圖說故事。
+       - **純淨裁切**：座標範圍 (box_2d) **必須嚴格只包含圖片畫面本身**，絕對排除旁邊的說明文字 (Caption)。
+       - **附註翻譯**：讀取圖片旁邊的說明文字並翻譯。絕對不要自行解釋圖片內容。
 
-    3. **輸出格式 (JSON Only)**：
-       - 請回傳標準 JSON。
-       - 座標格式 [ymin, xmin, ymax, xmax] (0-1000 比例)。
+    3. **座標識別**:
+       - 回傳 [ymin, xmin, ymax, xmax] (0-1000 比例)。
 
-    **JSON 範本**：
+    **輸出格式 (JSON Only)**：
     {
       "date": "YYYY年MM月DD日",
       "sections": [
         {
-          "type": "text", 
-          "box_2d": [ymin, xmin, ymax, xmax], 
-          "headline_jp": "...",
-          "headline_zh": "...",
-          "body_text_jp": "...",
-          "body_text_zh": "..."
+          "type": "news", 
+          "box_2d": [ymin, xmin, ymax, xmax], // 包含該則新聞所有文字的範圍
+          "headline_main_jp": "日文大標",
+          "headline_main_zh": "繁中大標翻譯",
+          "headline_sub_jp": "日文副標 (若無則空)",
+          "headline_sub_zh": "繁中副標翻譯 (若無則空)",
+          "body_text_jp": "日文內文全文...",
+          "body_text_zh": "繁中內文全文..."
         },
         {
           "type": "image",
-          "box_2d": [ymin, xmin, ymax, xmax], // 必須只包住圖片，不包住文字
-          "headline_jp": "", 
-          "headline_zh": "",
-          "body_text_jp": "圖片旁的日文說明文",
-          "body_text_zh": "說明文的繁中翻譯"
+          "box_2d": [ymin, xmin, ymax, xmax], // 僅圖片本身
+          "caption_jp": "識別到的日文附註",
+          "caption_zh": "附註翻譯"
         }
       ]
     }
@@ -175,88 +161,116 @@ def process_with_gemini(api_key, image_input):
     except Exception as e:
         return f"Error: {str(e)}"
 
-# --------------------------
-# 主程式邏輯
-# --------------------------
+# ---------------------------------------------------------
+# 主程式
+# ---------------------------------------------------------
 
-uploaded_files = st.file_uploader("請拖入或選擇報紙圖片 (支援批次)", type=["jpg", "jpeg", "png", "webp"], accept_multiple_files=True)
+uploaded_files = st.file_uploader("請選擇報紙圖片 (支援批次上傳)", type=["jpg", "jpeg", "png", "webp"], accept_multiple_files=True)
 
 if uploaded_files and api_key:
-    if st.button(f"🚀 開始批次處理 ({len(uploaded_files)} 張)", type="primary"):
+    if st.button(f"🚀 開始分析 ({len(uploaded_files)} 張)", type="primary"):
         
         progress_bar = st.progress(0)
         
         for idx, uploaded_file in enumerate(uploaded_files):
             st.divider()
-            st.header(f"📄 檔案：{uploaded_file.name}")
+            st.header(f"📰 處理檔案：{uploaded_file.name}")
             
             image = Image.open(uploaded_file)
             
-            with st.spinner(f"正在分析第 {idx+1} 張圖片..."):
+            with st.spinner(f"正在依據版面線段切分新聞... ({idx+1}/{len(uploaded_files)})"):
                 result_text = process_with_gemini(api_key, image)
                 
                 try:
                     data = json.loads(result_text)
-                    
-                    # 1. 互動式可視化
-                    st.subheader("1. 版面互動預覽 (紅色為純圖片範圍)")
-                    sections = data.get("sections", [])
-                    fig = create_interactive_plot(image, sections)
-                    st.plotly_chart(fig, use_container_width=True)
-                    
-                    # 2. 純圖片提取
-                    st.subheader("2. 圖片提取 (僅顯示純圖與附註翻譯)")
-                    image_sections = [s for s in sections if s.get("type") == "image"]
-                    
-                    if image_sections:
-                        cols = st.columns(3)
-                        for i, sec in enumerate(image_sections):
-                            cropped_img = crop_image_section(image, sec.get("box_2d"))
-                            caption_zh = sec.get('body_text_zh')
-                            
-                            with cols[i % 3]:
-                                if cropped_img:
-                                    st.image(cropped_img, use_container_width=True)
-                                    
-                                    # 這裡顯示翻譯好的附註，但圖片本身不含文字
-                                    if caption_zh and caption_zh.strip():
-                                        st.caption(f"📝 {caption_zh}")
-                                    else:
-                                        st.caption("(無附註文字)")
-                    else:
-                        st.info("未偵測到圖片。")
-
-                    # 3. 文章內容
-                    st.subheader("3. 文章內容翻譯")
                     st.info(f"📅 發行日期：{data.get('date', '未知')}")
                     
-                    text_sections = [s for s in sections if s.get("type") == "text"]
+                    sections = data.get("sections", [])
                     
-                    for sec in text_sections:
-                        with st.expander(f"📰 {sec.get('headline_zh', '無標題')}", expanded=True):
-                            c1, c2 = st.columns(2)
-                            with c1:
-                                st.markdown("**[繁中譯文]**")
-                                st.write(sec.get('body_text_zh'))
-                            with c2:
-                                st.markdown("**[日文原文]**")
-                                st.markdown(f"*{sec.get('body_text_jp')}*")
+                    # 分類區塊
+                    news_sections = [s for s in sections if s.get("type") == "news"]
+                    image_sections = [s for s in sections if s.get("type") == "image"]
+
+                    # -----------------------------------------
+                    # 1. 顯示新聞內容 (逐條列出)
+                    # -----------------------------------------
+                    st.subheader("📝 獨立新聞報導")
                     
-                    # 下載按鈕
+                    if not news_sections:
+                        st.warning("未偵測到文字新聞區塊。")
+                    
+                    for i, news in enumerate(news_sections):
+                        # 使用容器將每則新聞包起來
+                        with st.container(border=True):
+                            col_text, col_origin = st.columns([3, 1])
+                            
+                            with col_text:
+                                # 大標題
+                                h_main = news.get('headline_main_zh') or news.get('headline_main_jp') or "無標題"
+                                st.markdown(f"<div class='main-title'>{h_main}</div>", unsafe_allow_html=True)
+                                
+                                # 副標題
+                                h_sub = news.get('headline_sub_zh')
+                                if h_sub:
+                                    st.markdown(f"<div class='sub-title'>└ {h_sub}</div>", unsafe_allow_html=True)
+                                
+                                # 內文翻譯
+                                st.markdown("##### 🇹🇼 內文翻譯")
+                                st.write(news.get('body_text_zh'))
+
+                                # 日文原文 (折疊)
+                                with st.expander("查看日文原文"):
+                                    st.text(news.get('headline_main_jp'))
+                                    if news.get('headline_sub_jp'):
+                                        st.text(news.get('headline_sub_jp'))
+                                    st.markdown("---")
+                                    st.text(news.get('body_text_jp'))
+
+                            # 右側顯示該新聞在原圖的位置裁切 (方便對照)
+                            with col_origin:
+                                crop = crop_image_section(image, news.get("box_2d"))
+                                if crop:
+                                    st.image(crop, caption="原圖位置", use_container_width=True)
+                                else:
+                                    st.caption("無法顯示原圖位置")
+
+                    # -----------------------------------------
+                    # 2. 顯示圖片與附註 (Gallery 模式)
+                    # -----------------------------------------
+                    if image_sections:
+                        st.subheader("🖼️ 圖片集與附註")
+                        img_cols = st.columns(3) # 每行 3 張
+                        
+                        for i, img_sec in enumerate(image_sections):
+                            crop = crop_image_section(image, img_sec.get("box_2d"))
+                            caption = img_sec.get("caption_zh")
+                            
+                            with img_cols[i % 3]:
+                                if crop:
+                                    st.image(crop, use_container_width=True)
+                                else:
+                                    st.warning("圖片裁切失敗")
+                                
+                                if caption:
+                                    st.markdown(f"<div class='caption-text'>📝 {caption}</div>", unsafe_allow_html=True)
+                                else:
+                                    st.caption("(無附註)")
+                    
+                    # 下載 JSON
                     json_str = json.dumps(data, indent=2, ensure_ascii=False)
                     st.download_button(
-                        label=f"📥 下載 {uploaded_file.name} JSON",
+                        label=f"📥 下載 JSON",
                         data=json_str,
-                        file_name=f"{uploaded_file.name}_result.json",
+                        file_name=f"{uploaded_file.name}_parsed.json",
                         mime="application/json",
                         key=f"dl_{idx}"
                     )
 
                 except json.JSONDecodeError:
-                    st.error("解析失敗，AI 回傳格式有誤。")
+                    st.error("解析失敗，AI 回傳格式不正確。")
                 except Exception as e:
                     st.error(f"發生錯誤: {e}")
-            
+
             progress_bar.progress((idx + 1) / len(uploaded_files))
             
-        st.success("✅ 所有圖片處理完成！")
+        st.success("✅ 所有任務完成！")
